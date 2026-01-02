@@ -1,0 +1,4 @@
+# Cloud Function dependencies
+requests>=2.25.0
+google-cloud-storage>=2.0.0
+functions-framework>=3.0.0

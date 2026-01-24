@@ -20,6 +20,7 @@ health_check:
 # Environment variables
 env_variables:
   PORT: 8080
+  DB_BUCKET_NAME: tak-explorer-db
 
 # Network settings
 network:

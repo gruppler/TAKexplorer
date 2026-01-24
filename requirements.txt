@@ -1,15 +1,13 @@
-# Core dependencies for TAKexplorer
+# Core dependencies for TAKexplorer (from Pipfile)
 flask
+flask_cors
+flask-apscheduler
+apscheduler
 waitress
-
-# Database and data processing
-# sqlite3 is built into Python 3.11+
+tqdm
+requests
+tzdata
 
 # Google Cloud dependencies for App Engine
 gunicorn  # Required for App Engine WSGI server
 google-cloud-storage  # For database persistence
-
-# Additional dependencies that TAKexplorer might need
-# (add these based on the actual TAKexplorer requirements)
-requests>=2.25.0
-numpy>=1.19.0

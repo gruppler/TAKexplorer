@@ -6,7 +6,7 @@
 PROJECT_ID=$(gcloud config get-value project)
 FUNCTION_NAME="takexplorer-db-updater"
 REGION="us-central1"
-BUCKET_NAME="${PROJECT_ID}-takexplorer-db"
+BUCKET_NAME="tak-explorer-db"
 
 echo "Deploying TAKexplorer database updater function..."
 echo "Project: $PROJECT_ID"

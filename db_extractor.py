@@ -6,6 +6,8 @@ from typing import Optional
 from base_types import BoardSize
 
 BOTLIST = [
+    'BerryBot',
+    'SyntaksBot',
     'WilemBot',
     'TopazBot',
     'Tiltak_Bot',

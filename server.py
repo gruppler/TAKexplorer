@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import tempfile
 import time
 import traceback
 from contextlib import closing
@@ -21,8 +22,11 @@ from db_extractor import BOTLIST, get_games_from_db, get_ptn
 from position_db import PositionDataBase
 from base_types import BoardSize, NormalizedTpsString, TpsString, TpsSymmetry, color_to_place_from_tps
 
-DATA_DIR = 'data'
+# Use /tmp on App Engine (writable), 'data' locally
+IS_APP_ENGINE = os.environ.get('GAE_ENV', '').startswith('standard')
+DATA_DIR = os.path.join(tempfile.gettempdir(), 'takexplorer_data') if IS_APP_ENGINE else 'data'
 PLAYTAK_GAMES_DB = os.path.join(DATA_DIR, 'games_anon.db')
+DB_BUCKET_NAME = os.environ.get('DB_BUCKET_NAME')
 MAX_GAME_EXAMPLES = 4
 MAX_SUGGESTED_MOVES = 20
 MAX_PLIES = 30
@@ -91,7 +95,13 @@ openings_db_configs = [
 ]
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True)
+CORS(app, origins=[
+    "https://ptn.ninja",
+    "https://next.ptn.ninja",
+    "https://dev.ptn.ninja",
+    "http://localhost:8080",
+    "http://localhost:8081",
+], supports_credentials=True)
 app.config['JSON_SORT_KEYS'] = False
 app.config['SCHEDULER_API_ENABLED'] = True
 
@@ -115,6 +125,24 @@ def to_symmetric_tps(tps: TpsString) -> tuple[NormalizedTpsString, TpsSymmetry]:
     return symmetry_normalisator.get_tps_orientation(tps)
 
 
+def download_from_cloud_storage(bucket_name: str, blob_name: str, destination: str):
+    """Download a file from Cloud Storage to local path"""
+    try:
+        from google.cloud import storage
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        if blob.exists():
+            blob.download_to_filename(destination)
+            print(f"Downloaded {blob_name} from Cloud Storage to {destination}")
+            return True
+        else:
+            print(f"Blob {blob_name} not found in bucket {bucket_name}")
+            return False
+    except Exception as e:
+        print(f"Error downloading from Cloud Storage: {e}")
+        return False
+
 def download_playtak_db(url: str, destination: str):
     playtak_db_min_age = timedelta(hours=10)
     if (
@@ -123,6 +151,11 @@ def download_playtak_db(url: str, destination: str):
     ):
         print(f"Playtak database already exists and is less than {playtak_db_min_age} old")
         return
+
+    # On App Engine, try Cloud Storage first (much faster)
+    if IS_APP_ENGINE and DB_BUCKET_NAME:
+        if download_from_cloud_storage(DB_BUCKET_NAME, 'games_anon.db', destination):
+            return
 
     print("Fetching latest playtak games DB...")
     try:
@@ -134,6 +167,33 @@ def download_playtak_db(url: str, destination: str):
             print("No saved games database. exiting.")
             raise Exception("Failed to download playtak games database") from exc # pylint: disable=broad-exception-raised
         print("Using potentially outdated save of games database.")
+
+def upload_to_cloud_storage(bucket_name: str, source_path: str, blob_name: str):
+    """Upload a file to Cloud Storage"""
+    try:
+        from google.cloud import storage
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(source_path)
+        print(f"Uploaded {source_path} to gs://{bucket_name}/{blob_name}")
+        return True
+    except Exception as e:
+        print(f"Error uploading to Cloud Storage: {e}")
+        return False
+
+def download_openings_dbs_from_cloud():
+    """Download all openings databases from Cloud Storage (for App Engine cold start)"""
+    if not DB_BUCKET_NAME:
+        return False
+    
+    all_downloaded = True
+    for config in openings_db_configs:
+        blob_name = os.path.basename(config.db_file_name)
+        if not os.path.exists(config.db_file_name):
+            if not download_from_cloud_storage(DB_BUCKET_NAME, blob_name, config.db_file_name):
+                all_downloaded = False
+    return all_downloaded
 
 def update_openings_db(playtak_db: str, config: OpeningsDbConfig):
     print(f"extracting games from {playtak_db} to {config.db_file_name}")
@@ -155,6 +215,11 @@ def update_openings_db(playtak_db: str, config: OpeningsDbConfig):
         pos_db.commit()
 
         print("...done!")
+    
+    # Upload to Cloud Storage after building (for faster cold starts)
+    if DB_BUCKET_NAME:
+        blob_name = os.path.basename(config.db_file_name)
+        upload_to_cloud_storage(DB_BUCKET_NAME, config.db_file_name, blob_name)
 
 # import dayly update of playtak database
 @scheduler.task('cron', id='import_playtak_games', hour='17', minute="10", misfire_grace_time=900)
@@ -483,9 +548,20 @@ print("sqlite3 version", sqlite3.sqlite_version)
 
 try:
     print("creating data directory...")
-    os.mkdir(DATA_DIR)
+    os.makedirs(DATA_DIR, exist_ok=True)
 except FileExistsError as e:
     print("data directory already exists")
 
-# import new games if necessary (or do the initial import) asynchronously
-scheduler.add_job("initial_import", import_playtak_games)
+# On App Engine, try to download pre-built databases from Cloud Storage first
+# This is much faster than rebuilding from scratch on every cold start
+if IS_APP_ENGINE and DB_BUCKET_NAME:
+    print("App Engine detected, downloading databases from Cloud Storage...")
+    download_playtak_db('https://www.playtak.com/games_anon.db', PLAYTAK_GAMES_DB)
+    if download_openings_dbs_from_cloud():
+        print("All openings databases downloaded from Cloud Storage")
+    else:
+        print("Some databases missing from Cloud Storage, will rebuild...")
+        scheduler.add_job("initial_import", import_playtak_games)
+else:
+    # Local development: import new games if necessary (or do the initial import) asynchronously
+    scheduler.add_job("initial_import", import_playtak_games)

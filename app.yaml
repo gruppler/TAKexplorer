@@ -3,10 +3,10 @@ runtime: python311
 # F4 instance class: 1GB memory (F2 is 512MB, not enough for ~290MB database)
 instance_class: F4
 
-# Automatic scaling
+# Automatic scaling - disabled (using Cloud Run instead)
 automatic_scaling:
   min_instances: 0
-  max_instances: 2
+  max_instances: 0
   target_cpu_utilization: 0.65
 
 # Environment variables

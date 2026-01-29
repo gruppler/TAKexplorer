@@ -22,9 +22,11 @@ from db_extractor import BOTLIST, get_games_from_db, get_ptn
 from position_db import PositionDataBase
 from base_types import BoardSize, NormalizedTpsString, TpsString, TpsSymmetry, color_to_place_from_tps
 
-# Use /tmp on App Engine (writable), 'data' locally
+# Use /tmp on Cloud Run/App Engine (writable), 'data' locally
+IS_CLOUD_RUN = os.environ.get('K_SERVICE') is not None
 IS_APP_ENGINE = os.environ.get('GAE_ENV', '').startswith('standard')
-DATA_DIR = os.path.join(tempfile.gettempdir(), 'takexplorer_data') if IS_APP_ENGINE else 'data'
+IS_CLOUD = IS_CLOUD_RUN or IS_APP_ENGINE
+DATA_DIR = os.path.join(tempfile.gettempdir(), 'takexplorer_data') if IS_CLOUD else 'data'
 PLAYTAK_GAMES_DB = os.path.join(DATA_DIR, 'games_anon.db')
 DB_BUCKET_NAME = os.environ.get('DB_BUCKET_NAME')
 MAX_GAME_EXAMPLES = 4
@@ -99,8 +101,6 @@ CORS(app, origins=[
     "https://ptn.ninja",
     "https://next.ptn.ninja",
     "https://dev.ptn.ninja",
-    "http://localhost:8080",
-    "http://localhost:8081",
 ], supports_credentials=True)
 app.config['JSON_SORT_KEYS'] = False
 app.config['SCHEDULER_API_ENABLED'] = True
@@ -152,8 +152,8 @@ def download_playtak_db(url: str, destination: str):
         print(f"Playtak database already exists and is less than {playtak_db_min_age} old")
         return
 
-    # On App Engine, try Cloud Storage first (much faster)
-    if IS_APP_ENGINE and DB_BUCKET_NAME:
+    # On Cloud Run/App Engine, try Cloud Storage first (much faster)
+    if IS_CLOUD and DB_BUCKET_NAME:
         if download_from_cloud_storage(DB_BUCKET_NAME, 'games_anon.db', destination):
             return
 
@@ -194,6 +194,25 @@ def download_openings_dbs_from_cloud():
             if not download_from_cloud_storage(DB_BUCKET_NAME, blob_name, config.db_file_name):
                 all_downloaded = False
     return all_downloaded
+
+def ensure_openings_db_exists(config: OpeningsDbConfig):
+    """Lazily download a single openings database if it doesn't exist locally"""
+    if os.path.exists(config.db_file_name):
+        return True
+    
+    if IS_CLOUD and DB_BUCKET_NAME:
+        blob_name = os.path.basename(config.db_file_name)
+        return download_from_cloud_storage(DB_BUCKET_NAME, blob_name, config.db_file_name)
+    return False
+
+def ensure_playtak_db_exists():
+    """Lazily download the playtak games database if it doesn't exist locally"""
+    if os.path.exists(PLAYTAK_GAMES_DB):
+        return True
+    
+    if IS_CLOUD and DB_BUCKET_NAME:
+        return download_from_cloud_storage(DB_BUCKET_NAME, 'games_anon.db', PLAYTAK_GAMES_DB)
+    return False
 
 def update_openings_db(playtak_db: str, config: OpeningsDbConfig):
     print(f"extracting games from {playtak_db} to {config.db_file_name}")
@@ -266,6 +285,9 @@ def options():
 
 @app.route('/api/v1/game/<game_id>', methods=['get'])
 def get_game(game_id):
+    # Lazy load the playtak games database on first access
+    ensure_playtak_db_exists()
+    
     select_game_sql = "SELECT * FROM games WHERE id=:game_id;"
     with closing(sqlite3.connect(PLAYTAK_GAMES_DB)) as db:
         db.row_factory = sqlite3.Row
@@ -284,6 +306,9 @@ def get_position_analysis(
     settings: AnalysisSettings,
     tps: TpsString,
 ) -> PositionAnalysis:
+    # Lazy load the openings database on first access
+    ensure_openings_db_exists(config)
+    
     print(f'requested position with white: {settings.white}, black: {settings.black}, min rating: {settings.min_rating}, tps: {tps}')
 
     player_to_move = color_to_place_from_tps(tps)
@@ -529,6 +554,8 @@ def get_player_names():
     white_names = set()
     black_names = set()
     for config in openings_db_configs:
+        # Lazy load each openings database
+        ensure_openings_db_exists(config)
         with closing(sqlite3.connect(config.db_file_name)) as db:
             db.row_factory = sqlite3.Row
             with closing(db.cursor()) as cur:
@@ -552,16 +579,10 @@ try:
 except FileExistsError as e:
     print("data directory already exists")
 
-# On App Engine, try to download pre-built databases from Cloud Storage first
-# This is much faster than rebuilding from scratch on every cold start
-if IS_APP_ENGINE and DB_BUCKET_NAME:
-    print("App Engine detected, downloading databases from Cloud Storage...")
-    download_playtak_db('https://www.playtak.com/games_anon.db', PLAYTAK_GAMES_DB)
-    if download_openings_dbs_from_cloud():
-        print("All openings databases downloaded from Cloud Storage")
-    else:
-        print("Some databases missing from Cloud Storage, will rebuild...")
-        scheduler.add_job("initial_import", import_playtak_games)
+# On Cloud Run/App Engine, use lazy loading - databases are downloaded on first request
+# This makes cold starts much faster (seconds instead of minutes)
+if IS_CLOUD and DB_BUCKET_NAME:
+    print("Cloud environment detected, databases will be downloaded lazily on first request")
 else:
     # Local development: import new games if necessary (or do the initial import) asynchronously
     scheduler.add_job("initial_import", import_playtak_games)

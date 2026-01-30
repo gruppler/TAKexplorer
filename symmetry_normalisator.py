@@ -56,8 +56,8 @@ def get_tps_orientation(tps: TpsString) -> Tuple[NormalizedTpsString, TpsSymmetr
     nitzel 20230603: I've tried improving the performance by reducing the number
     of `NormalizedTpsString <-> list[list[str]]` conversions but that slowed it down instead.
     """
-    # ignore ending (current player)
-    tps = TpsString(tps[:-4])
+    # ignore ending (current player and ply counter)
+    tps = TpsString(tps.split(' ')[0])
 
     tps_expanded = expand_tps_xn(tps)
     o = 0
@@ -84,8 +84,10 @@ def get_tps_orientation(tps: TpsString) -> Tuple[NormalizedTpsString, TpsSymmetr
 
 def transform_tps(tps: TpsString, orientation: int) -> TpsString:
     # remove current player and current move
-    ending = tps[-4:]
-    tps = TpsString(tps[:-4])
+    parts = tps.split(' ')
+    board = parts[0]
+    ending = ' ' + ' '.join(parts[1:]) if len(parts) > 1 else ''
+    tps = TpsString(board)
     tps_expanded = expand_tps_xn(tps)
     if orientation > 3:
         tps_expanded = flip_tps(tps_expanded)

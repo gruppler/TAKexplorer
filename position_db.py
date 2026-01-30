@@ -46,6 +46,7 @@ class PositionDataBase(PositionProcessor):
                 id integer PRIMARY KEY,
                 game_id integer,
                 position_id integer,
+                next_move text,
                 FOREIGN KEY (game_id) REFERENCES games(id),
                 FOREIGN KEY (position_id) REFERENCES positions(id)
             );
@@ -151,9 +152,18 @@ class PositionDataBase(PositionProcessor):
             row_dict = dict(row)
             position_id = row_dict['id']
 
+            # Store the symmetry-normalized move that will be played from this position
+            next_move_normalized = None
+            if move is not None:
+                next_move_normalized = symmetry_normalisator.transform_move(
+                    move=move,
+                    orientation=own_symmetry,
+                    board_size=tak.size,
+                )
+
             curr.execute(
-                "INSERT INTO game_position_xref (game_id, position_id) VALUES (:game_id, :position_id);",
-                { 'game_id': game_id, 'position_id': position_id }
+                "INSERT INTO game_position_xref (game_id, position_id, next_move) VALUES (:game_id, :position_id, :next_move);",
+                { 'game_id': game_id, 'position_id': position_id, 'next_move': next_move_normalized }
             )
 
             if next_tps is not None and move is not None:

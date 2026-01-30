@@ -29,7 +29,7 @@ IS_CLOUD = IS_CLOUD_RUN or IS_APP_ENGINE
 DATA_DIR = os.path.join(tempfile.gettempdir(), 'takexplorer_data') if IS_CLOUD else 'data'
 PLAYTAK_GAMES_DB = os.path.join(DATA_DIR, 'games_anon.db')
 DB_BUCKET_NAME = os.environ.get('DB_BUCKET_NAME')
-MAX_GAME_EXAMPLES = 4
+MAX_GAME_EXAMPLES = 10
 MAX_SUGGESTED_MOVES = 20
 MAX_PLIES = 30
 NUM_PLIES = 12
@@ -62,6 +62,7 @@ class GameInfo:
     date: str # isoformat utc
     komi: float
     tournament: bool
+    next_move: Optional[str] = None
 
 @dataclass
 class AnalysisSettings:
@@ -101,6 +102,8 @@ CORS(app, origins=[
     "https://ptn.ninja",
     "https://next.ptn.ninja",
     "https://dev.ptn.ninja",
+    "http://localhost:8080",
+    "http://localhost:8081",
 ], supports_credentials=True)
 app.config['JSON_SORT_KEYS'] = False
 app.config['SCHEDULER_API_ENABLED'] = True
@@ -479,7 +482,7 @@ def get_position_analysis(
             # get top games
             select_games_sql = f"""
                 SELECT games.id, games.playtak_id, games.white, games.black, games.result, games.komi, games.rating_white, games.rating_black, games.date, games.tournament,
-                    game_position_xref.game_id, game_position_xref.position_id,
+                    game_position_xref.game_id, game_position_xref.position_id, game_position_xref.next_move,
                     positions.id, positions.tps, (games.rating_white+games.rating_black)/2 AS avg_rating
                 FROM game_position_xref, games, positions
                 WHERE game_position_xref.position_id=positions.id
@@ -509,6 +512,14 @@ def get_position_analysis(
             # todo: normalize (rotate) game so that users aren't interrupted in their
             # exploration with suddenly rotated games
             for game in map(dict, top_games):
+                # Transform the next_move back to the user's symmetry orientation
+                next_move = game.get('next_move')
+                if next_move:
+                    next_move = symmetry_normalisator.transposed_transform_move(
+                        next_move,
+                        symmetry,
+                        config.size,
+                    )
                 position_analysis.games.append(GameInfo(
                     playtak_id = game['playtak_id'],
                     result = game['result'],
@@ -517,6 +528,7 @@ def get_position_analysis(
                     komi = float(game['komi'] or 0) / 2,
                     date = isoformat_from(game['date']),
                     tournament=bool(game['tournament']),
+                    next_move=next_move,
                 ))
 
             return position_analysis

@@ -108,8 +108,6 @@ def get_ptn(game) -> str:
     ptn += get_header('Rating1', game['rating_white'])
     ptn += get_header('Rating2', game['rating_black'])
 
-    ptn += get_header('playtak_id', game['id'])
-
     # date and time headers
     dt = datetime.utcfromtimestamp((game['date'] / 1000))
     ptn += get_header('Date', dt.strftime("%Y.%m.%d"))

@@ -51,7 +51,7 @@ gcloud run deploy takexplorer \
   --allow-unauthenticated \
   --set-env-vars DB_BUCKET_NAME=your-project-id-db \
   --memory 1Gi \
-  --timeout 60 \
+  --timeout 900 \
   --concurrency 80
 ```
 

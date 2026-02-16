@@ -89,12 +89,12 @@ class PositionAnalysis:
 
 
 openings_db_configs = [
+    # 5x5 first - largest DB (~95MB), takes longest to build, must complete before any timeout
+    OpeningsDbConfig(min_rating=1500, include_bot_games=True, size=BoardSize(5)),
     OpeningsDbConfig(min_rating=MIN_RATING, include_bot_games=False, size=BoardSize(6)),
     OpeningsDbConfig(min_rating=1700, include_bot_games=True, size=BoardSize(6)),
     OpeningsDbConfig(min_rating=1200, include_bot_games=True, size=BoardSize(7)),
     OpeningsDbConfig(min_rating=1500, include_bot_games=True, size=BoardSize(8)),
-    # careful, 5x5 with 1500 elo and bots contains ~60k
-    OpeningsDbConfig(min_rating=1500, include_bot_games=True, size=BoardSize(5)),
 ]
 
 app = Flask(__name__)
@@ -248,9 +248,34 @@ def update_openings_db(playtak_db: str, config: OpeningsDbConfig):
 def import_playtak_games():
     download_playtak_db('https://www.playtak.com/games_anon.db', PLAYTAK_GAMES_DB)
 
+    failed_configs = []
     for config in openings_db_configs:
-        update_openings_db(PLAYTAK_GAMES_DB, config)
-    print(f"updated {len(openings_db_configs)} opening dbs")
+        try:
+            update_openings_db(PLAYTAK_GAMES_DB, config)
+        except Exception as e:
+            print(f"ERROR: Failed to update {config.db_file_name}: {e}")
+            traceback.print_exc()
+            failed_configs.append(config)
+    
+    # Retry failed configs once
+    if failed_configs:
+        print(f"Retrying {len(failed_configs)} failed database(s)...")
+        still_failed = []
+        for config in failed_configs:
+            try:
+                update_openings_db(PLAYTAK_GAMES_DB, config)
+                print(f"Retry succeeded for {config.db_file_name}")
+            except Exception as e:
+                print(f"ERROR: Retry failed for {config.db_file_name}: {e}")
+                traceback.print_exc()
+                still_failed.append(config)
+        
+        if still_failed:
+            print(f"WARNING: {len(still_failed)} database(s) failed after retry: {[c.db_file_name for c in still_failed]}")
+    
+    final_failed = still_failed if failed_configs else []
+    successful = len(openings_db_configs) - len(final_failed)
+    print(f"updated {successful}/{len(openings_db_configs)} opening dbs")
 
 
 @app.errorhandler(HTTPException)  # type: ignore
@@ -281,6 +306,48 @@ def handle_exception(exc: Exception):
 @app.route('/', methods=['GET'])
 def hello():
     return "hello"
+
+@app.route('/api/v1/update-databases', methods=['POST'])
+def trigger_database_update():
+    """HTTP endpoint for Cloud Scheduler to trigger database rebuild.
+    This allows scale-to-zero Cloud Run to still receive scheduled updates.
+    Runs synchronously - set Cloud Run timeout to 900s (15 min) for this to complete.
+    """
+    # Verify request is from Cloud Scheduler or has valid OIDC token
+    # Cloud Scheduler sets these headers; reject requests without them in production
+    if IS_CLOUD and not request.headers.get('X-CloudScheduler'):
+        # Also allow requests with valid OIDC token (Authorization header)
+        if not request.headers.get('Authorization'):
+            return jsonify({"error": "Unauthorized"}), 403
+    
+    try:
+        download_playtak_db('https://www.playtak.com/games_anon.db', PLAYTAK_GAMES_DB)
+        
+        results = {}
+        for config in openings_db_configs:
+            db_name = os.path.basename(config.db_file_name)
+            try:
+                update_openings_db(PLAYTAK_GAMES_DB, config)
+                results[db_name] = "success"
+            except Exception as e:
+                print(f"ERROR: Failed to update {db_name}: {e}")
+                traceback.print_exc()
+                results[db_name] = f"failed: {str(e)}"
+        
+        failed_count = sum(1 for v in results.values() if v != "success")
+        return jsonify({
+            "status": "success" if failed_count == 0 else "partial",
+            "updated": len(results) - failed_count,
+            "failed": failed_count,
+            "details": results
+        })
+    except Exception as e:
+        print(f"Database update failed: {e}")
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
 @app.route('/api/v1/databases', methods=['GET'])
 def options():

@@ -5,3 +5,4 @@
 /util/*.csv
 /util/db_dump
 /__pycache__/*
+venv/*

@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import traceback
 from contextlib import closing
@@ -11,16 +12,26 @@ from datetime import datetime, timedelta
 from typing import Optional, Union
 
 import requests
-from flask import Flask, json, jsonify, request
+from flask import Flask, g, json, jsonify, request
 from flask_apscheduler import APScheduler
 from flask_cors import CORS
-from werkzeug.exceptions import HTTPException, InternalServerError, NotFound
+from werkzeug.exceptions import HTTPException, InternalServerError, NotFound, ServiceUnavailable
 
 import ptn_parser
 import symmetry_normalisator
 from db_extractor import BOTLIST, get_games_from_db, get_ptn
 from position_db import PositionDataBase
 from base_types import BoardSize, NormalizedTpsString, TpsString, TpsSymmetry, color_to_place_from_tps
+
+# Tracks blobs currently being downloaded to avoid duplicate concurrent downloads
+_download_locks: dict[str, threading.Lock] = {}
+_download_locks_mutex = threading.Lock()
+
+def _get_download_lock(key: str) -> threading.Lock:
+    with _download_locks_mutex:
+        if key not in _download_locks:
+            _download_locks[key] = threading.Lock()
+        return _download_locks[key]
 
 # Use /tmp on Cloud Run/App Engine (writable), 'data' locally
 IS_CLOUD_RUN = os.environ.get('K_SERVICE') is not None
@@ -108,6 +119,29 @@ CORS(app, origins=[
 app.config['JSON_SORT_KEYS'] = False
 app.config['SCHEDULER_API_ENABLED'] = True
 
+@app.before_request
+def before_request():
+    """Log request start time for debugging"""
+    g.start_time = time.time()
+    print(f"[{datetime.utcnow().isoformat()}] {request.method} {request.path} - Request started")
+
+@app.after_request
+def after_request(response):
+    """Log request completion time"""
+    if hasattr(g, 'start_time'):
+        elapsed = time.time() - g.start_time
+        print(f"[{datetime.utcnow().isoformat()}] {request.method} {request.path} - {response.status_code} in {elapsed:.3f}s")
+    return response
+
+@app.errorhandler(504)
+def handle_timeout(e):
+    """Handle gateway timeout errors"""
+    return jsonify({
+        "error": "Request timeout",
+        "message": "The request took too long to process. This may be due to cold start or large database downloads.",
+        "retry_after": 30
+    }), 504
+
 scheduler = APScheduler()
 scheduler.init_app(app)
 scheduler.start()
@@ -132,18 +166,41 @@ def download_from_cloud_storage(bucket_name: str, blob_name: str, destination: s
     """Download a file from Cloud Storage to local path"""
     try:
         from google.cloud import storage
+        import threading
+        import time
+        
+        print(f"[{datetime.utcnow().isoformat()}] Starting download of {blob_name} from Cloud Storage...")
+        start_time = time.time()
+        
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
+        
         if blob.exists():
-            blob.download_to_filename(destination)
-            print(f"Downloaded {blob_name} from Cloud Storage to {destination}")
+            # Create a progress reporter
+            def progress_reporter():
+                while True:
+                    if os.path.exists(destination + '.downloading'):
+                        time.sleep(5)
+                    else:
+                        break
+            
+            # Download with temporary file name
+            temp_destination = destination + '.downloading'
+            blob.download_to_filename(temp_destination)
+            
+            # Rename to final destination
+            os.rename(temp_destination, destination)
+            
+            elapsed = time.time() - start_time
+            print(f"[{datetime.utcnow().isoformat()}] Downloaded {blob_name} ({os.path.getsize(destination)/1024/1024:.1f}MB) in {elapsed:.1f}s")
             return True
         else:
-            print(f"Blob {blob_name} not found in bucket {bucket_name}")
+            print(f"[ERROR] Blob {blob_name} not found in bucket {bucket_name}")
             return False
     except Exception as e:
-        print(f"Error downloading from Cloud Storage: {e}")
+        print(f"[ERROR] Failed to download from Cloud Storage: {e}")
+        traceback.print_exc()
         return False
 
 def download_playtak_db(url: str, destination: str):
@@ -199,23 +256,47 @@ def download_openings_dbs_from_cloud():
     return all_downloaded
 
 def ensure_openings_db_exists(config: OpeningsDbConfig):
-    """Lazily download a single openings database if it doesn't exist locally"""
+    """Lazily download a single openings database if it doesn't exist locally.
+    If a download is already in progress, raises ServiceUnavailable so the client retries.
+    """
     if os.path.exists(config.db_file_name):
         return True
-    
-    if IS_CLOUD and DB_BUCKET_NAME:
-        blob_name = os.path.basename(config.db_file_name)
+
+    if not (IS_CLOUD and DB_BUCKET_NAME):
+        return False
+
+    blob_name = os.path.basename(config.db_file_name)
+    lock = _get_download_lock(blob_name)
+    if not lock.acquire(blocking=False):
+        # Another thread is already downloading this DB — tell the client to retry
+        raise ServiceUnavailable(description=f"Database {blob_name} is being loaded, please retry in a few seconds.")
+    try:
+        # Re-check now that we hold the lock (another thread may have finished)
+        if os.path.exists(config.db_file_name):
+            return True
         return download_from_cloud_storage(DB_BUCKET_NAME, blob_name, config.db_file_name)
-    return False
+    finally:
+        lock.release()
 
 def ensure_playtak_db_exists():
-    """Lazily download the playtak games database if it doesn't exist locally"""
+    """Lazily download the playtak games database if it doesn't exist locally.
+    If a download is already in progress, raises ServiceUnavailable so the client retries.
+    """
     if os.path.exists(PLAYTAK_GAMES_DB):
         return True
-    
-    if IS_CLOUD and DB_BUCKET_NAME:
+
+    if not (IS_CLOUD and DB_BUCKET_NAME):
+        return False
+
+    lock = _get_download_lock('games_anon.db')
+    if not lock.acquire(blocking=False):
+        raise ServiceUnavailable(description="Games database is being loaded, please retry in a few seconds.")
+    try:
+        if os.path.exists(PLAYTAK_GAMES_DB):
+            return True
         return download_from_cloud_storage(DB_BUCKET_NAME, 'games_anon.db', PLAYTAK_GAMES_DB)
-    return False
+    finally:
+        lock.release()
 
 def update_openings_db(playtak_db: str, config: OpeningsDbConfig):
     print(f"extracting games from {playtak_db} to {config.db_file_name}")
@@ -306,6 +387,37 @@ def handle_exception(exc: Exception):
 @app.route('/', methods=['GET'])
 def hello():
     return "hello"
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for Cloud Run"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "1.0"
+    }), 200
+
+@app.route('/ready', methods=['GET'])
+def ready():
+    """Readiness check - verifies critical databases are accessible"""
+    try:
+        # Check if primary database is accessible
+        if os.path.exists(PLAYTAK_GAMES_DB):
+            return jsonify({
+                "status": "ready",
+                "databases_loaded": True
+            }), 200
+        else:
+            # If database doesn't exist, we're still starting up
+            return jsonify({
+                "status": "starting",
+                "databases_loaded": False
+            }), 503
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e)
+        }), 503
 
 @app.route('/api/v1/update-databases', methods=['POST'])
 def trigger_database_update():

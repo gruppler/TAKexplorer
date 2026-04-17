@@ -27,7 +27,6 @@ gcloud config set project your-project-id
 gcloud services enable run.googleapis.com
 gcloud services enable cloudbuild.googleapis.com
 gcloud services enable storage.googleapis.com
-gcloud services enable cloudfunctions.googleapis.com
 gcloud services enable cloudscheduler.googleapis.com
 ```
 
@@ -59,18 +58,9 @@ Your service will be available at: `https://takexplorer-XXXXXXXXXX.us-central1.r
 
 ## Step 4: Setup Periodic Database Updates
 
-### Deploy Database Updater Function
+Cloud Scheduler triggers the Cloud Run `/api/v1/update-databases` endpoint daily at 09:10 UTC.
 
 ```bash
-cd database_updater_function
-chmod +x deploy.sh
-./deploy.sh
-```
-
-### Setup Cloud Scheduler
-
-```bash
-cd ..
 chmod +x setup_scheduler.sh
 ./setup_scheduler.sh
 ```
@@ -112,7 +102,7 @@ gcloud run deploy takexplorer --source . --region us-central1
 ## How It Works
 
 1. **Cold Start**: When a new instance starts, it downloads databases lazily on first request
-2. **Database Updates**: Cloud Function runs daily to update `games_anon.db` in Cloud Storage
+2. **Database Updates**: Cloud Scheduler triggers the Cloud Run endpoint daily to download the latest games and rebuild openings databases
 3. **Scaling**: Cloud Run scales to 0 when idle, scales up on demand
 
 ## Cost Comparison
@@ -120,7 +110,6 @@ gcloud run deploy takexplorer --source . --region us-central1
 | Service                 | Monthly Cost     |
 | ----------------------- | ---------------- |
 | Cloud Run (light usage) | ~$5-10           |
-| Cloud Function          | Free tier        |
 | Cloud Scheduler         | ~$0.10           |
 | Cloud Storage           | ~$1-2            |
 | **Total**               | **~$6-12/month** |
@@ -132,9 +121,6 @@ vs App Engine F4 always-on: ~$60/month
 ```bash
 # View Cloud Run logs
 gcloud run services logs read takexplorer --region us-central1
-
-# View Cloud Function logs
-gcloud functions logs read takexplorer-db-updater --region us-central1
 
 # Check service status
 gcloud run services describe takexplorer --region us-central1

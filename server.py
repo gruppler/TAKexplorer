@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -218,10 +219,14 @@ def download_playtak_db(url: str, destination: str):
             return
 
     print("Fetching latest playtak games DB...")
+    tmp_path = destination + '.downloading'
     try:
-        with requests.get(url, timeout=None) as requ, open(destination,'wb') as output_file:
+        with requests.get(url, timeout=None) as requ, open(tmp_path, 'wb') as output_file:
             output_file.write(requ.content)
+        os.rename(tmp_path, destination)
     except Exception as exc:  # pylint: disable=broad-exception-caught
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
         print("Cannot reach playtak server")
         if not os.path.exists(destination):
             print("No saved games database. exiting.")
@@ -300,32 +305,47 @@ def ensure_playtak_db_exists():
 
 def update_openings_db(playtak_db: str, config: OpeningsDbConfig):
     print(f"extracting games from {playtak_db} to {config.db_file_name}")
-    with PositionDataBase(config.db_file_name) as pos_db:
-        games = get_games_from_db(
-            db_file=PLAYTAK_GAMES_DB,
-            board_size=config.size,
-            num_plies=NUM_PLIES,
-            num_games=NUM_GAMES,
-            min_rating=config.min_rating,
-            player_white=None,
-            player_black=None,
-            start_id=pos_db.max_id,
-            exclude_bots=not config.include_bot_games,
-        )
 
-        print("building opening table...")
-        ptn_parser.add_games_to_db(games, pos_db, max_plies=MAX_PLIES)
-        pos_db.commit()
+    # Build into a temp file so readers are never blocked by the write lock.
+    # After the build completes, atomically swap the temp file over the live one.
+    tmp_path = config.db_file_name + '.building'
+    try:
+        if os.path.exists(config.db_file_name):
+            shutil.copy2(config.db_file_name, tmp_path)
 
-        print("...done!")
-    
+        with PositionDataBase(tmp_path) as pos_db:
+            games = get_games_from_db(
+                db_file=PLAYTAK_GAMES_DB,
+                board_size=config.size,
+                num_plies=NUM_PLIES,
+                num_games=NUM_GAMES,
+                min_rating=config.min_rating,
+                player_white=None,
+                player_black=None,
+                start_id=pos_db.max_id,
+                exclude_bots=not config.include_bot_games,
+            )
+
+            print("building opening table...")
+            ptn_parser.add_games_to_db(games, pos_db, max_plies=MAX_PLIES)
+            pos_db.commit()
+
+            print("...done!")
+
+        os.rename(tmp_path, config.db_file_name)
+        print(f"Swapped in updated database: {config.db_file_name}")
+    except:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
     # Upload to Cloud Storage after building (for faster cold starts)
     if DB_BUCKET_NAME:
         blob_name = os.path.basename(config.db_file_name)
         upload_to_cloud_storage(DB_BUCKET_NAME, config.db_file_name, blob_name)
 
-# import dayly update of playtak database
-@scheduler.task('cron', id='import_playtak_games', hour='17', minute="10", misfire_grace_time=900)
+# import daily update of playtak database
+@scheduler.task('cron', id='import_playtak_games', hour='9', minute="10", misfire_grace_time=900)
 def import_playtak_games():
     download_playtak_db('https://www.playtak.com/games_anon.db', PLAYTAK_GAMES_DB)
 

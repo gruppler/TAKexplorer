@@ -9,7 +9,7 @@ PROJECT_ID=$(gcloud config get-value project)
 SERVICE_NAME="takexplorer"
 REGION="us-central1"
 SCHEDULER_NAME="takexplorer-db-update-schedule"
-SCHEDULE="0 17 * * *"  # Daily at 17:00 UTC (matches original scheduler time)
+SCHEDULE="10 9 * * *"  # Daily at 09:10 UTC (low-traffic window: 4am EST / 1am PST / 10am CET)
 TIMEZONE="UTC"
 
 echo "Setting up Cloud Scheduler for TAKexplorer database updates..."

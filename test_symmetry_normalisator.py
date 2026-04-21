@@ -87,6 +87,39 @@ class TestRotateLocation():
         assert symnorm.rot_loc(location, size) == expected
 
 
+class TestGetSelfSymmetries():
+    def test_empty_board_has_full_dihedral_group(self):
+        # An empty 5x5 board is fixed by every element of D4.
+        tps = "x5/x5/x5/x5/x5 1 1"
+        result = symnorm.get_self_symmetries(tps)
+        assert sorted(result) == [0, 1, 2, 3, 4, 5, 6, 7]
+
+    def test_empty_board_6s_full_dihedral_group(self):
+        tps = "x6/x6/x6/x6/x6/x6 1 1"
+        result = symnorm.get_self_symmetries(tps)
+        assert sorted(result) == [0, 1, 2, 3, 4, 5, 6, 7]
+
+    def test_corner_piece_has_diagonal_reflection_only(self):
+        # A single piece in one corner preserves only the identity and the
+        # reflection across the a1-e5 diagonal.
+        tps = "x5/x5/x5/x5/2,x4 1 1"
+        result = symnorm.get_self_symmetries(tps)
+        assert sorted(result) == [0, 5]
+
+    def test_center_piece_only_5s_has_full_dihedral_group(self):
+        # A single piece at the center of a 5x5 board is fixed by all D4
+        # elements.
+        tps = "x5/x5/x2,1,x2/x5/x5 1 1"
+        result = symnorm.get_self_symmetries(tps)
+        assert sorted(result) == [0, 1, 2, 3, 4, 5, 6, 7]
+
+    def test_asymmetric_position_has_only_identity(self):
+        # A non-symmetric arrangement should produce exactly the identity.
+        tps = "x5/x5/x5/1,2,x3/2,x4 1 1"
+        result = symnorm.get_self_symmetries(tps)
+        assert sorted(result) == [0]
+
+
 class TestTransformMove():
     def test_transform_move_6s(self):
         size = BoardSize(6)

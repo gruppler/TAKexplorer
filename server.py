@@ -548,6 +548,30 @@ def get_position_analysis(
 
             moves_list: list[tuple[str, str]] = list(map(lambda x: x.split(','), position_moves))
 
+            # Group stored moves by their orbit under the self-symmetries of
+            # the canonical position. Without this, moves that are mirror /
+            # rotation equivalents of each other (e.g. `a2` and `b1` from a
+            # position with diagonal symmetry, or all four corners from the
+            # empty board) show up as separate suggestions scattered across
+            # the board instead of a single aggregated suggestion.
+            self_symmetries = symmetry_normalisator.get_self_symmetries(
+                TpsString(sym_tps)
+            )
+            move_orbits: dict[str, list[tuple[str, str]]] = {}
+            orbit_order: list[str] = []
+            for (move, position_id) in moves_list:
+                if len(self_symmetries) == 1:
+                    canonical_move = move
+                else:
+                    canonical_move = min(
+                        symmetry_normalisator.transform_move(move, g, config.size)
+                        for g in self_symmetries
+                    )
+                if canonical_move not in move_orbits:
+                    move_orbits[canonical_move] = []
+                    orbit_order.append(canonical_move)
+                move_orbits[canonical_move].append((move, position_id))
+
             explored_position_ids: set[str] = set()
             moves = []
 
@@ -614,57 +638,64 @@ def get_position_analysis(
                 **tournament_vals,
             }
 
-            for (move, position_id) in moves_list:
-                if position_id in explored_position_ids:
+            for canonical_move in orbit_order:
+                orbit_wwins = 0
+                orbit_bwins = 0
+                orbit_draws = 0
+                orbit_has_games = False
+
+                for (_stored_move, position_id) in move_orbits[canonical_move]:
+                    if position_id in explored_position_ids:
+                        continue
+                    explored_position_ids.add(position_id)
+
+                    # no need to specify player_to_move here, because we're already walking by positions.id
+                    select_games_sql = f"""
+                        SELECT games.result, count(games.result) AS count
+                        FROM game_position_xref, games, positions
+                        WHERE game_position_xref.position_id = positions.id
+                            AND games.id = game_position_xref.game_id
+                            AND positions.id = {position_id}
+                            AND games.rating_white >= :min_rating
+                            AND games.rating_black >= :min_rating
+                            {tournament_str}
+                            {min_date_str}
+                            {max_date_str}
+                            {white_str}
+                            {black_str}
+                            {exclude_bots_white_str}
+                            {exclude_bots_black_str}
+                            {komi_str}
+                        GROUP BY games.result
+                    """
+                    cur.execute(select_games_sql, default_query_vars)
+                    exe_res = list(cur.fetchall())
+                    if len(exe_res) == 0:
+                        continue
+
+                    orbit_has_games = True
+                    for next_row in map(dict, exe_res):
+                        if next_row['result'].startswith('0-'):
+                            orbit_bwins += next_row['count']
+                        elif next_row['result'].endswith('-0'):
+                            orbit_wwins += next_row['count']
+                        elif next_row['result'] == '1/2-1/2':
+                            orbit_draws += next_row['count']
+
+                if not orbit_has_games:
                     continue
-                explored_position_ids.add(position_id)
 
-                # no need to specify player_to_move here, because we're already walking by positions.id
-                select_games_sql = f"""
-                    SELECT games.result, count(games.result) AS count
-                    FROM game_position_xref, games, positions
-                    WHERE game_position_xref.position_id = positions.id
-                        AND games.id = game_position_xref.game_id
-                        AND positions.id = {position_id}
-                        AND games.rating_white >= :min_rating
-                        AND games.rating_black >= :min_rating
-                        {tournament_str}
-                        {min_date_str}
-                        {max_date_str}
-                        {white_str}
-                        {black_str}
-                        {exclude_bots_white_str}
-                        {exclude_bots_black_str}
-                        {komi_str}
-                    GROUP BY games.result
-                """
-                cur.execute(select_games_sql, default_query_vars)
-                exe_res = list(cur.fetchall())
-                if len(exe_res) == 0:
-                    continue
+                total_wwins += orbit_wwins
+                total_bwins += orbit_bwins
+                total_draws += orbit_draws
 
-                wwins = 0
-                bwins = 0
-                draws = 0
-                for next_row in map(dict, exe_res):
-                    if next_row['result'].startswith('0-'):
-                        bwins += next_row['count']
-                    elif next_row['result'].endswith('-0'):
-                        wwins += next_row['count']
-                    elif next_row['result'] == '1/2-1/2':
-                        draws += next_row['count']
-
-                total_wwins += wwins
-                total_bwins += bwins
-                total_draws += draws
-
-                move = symmetry_normalisator.transposed_transform_move(
-                    move,
+                display_move = symmetry_normalisator.transposed_transform_move(
+                    canonical_move,
                     symmetry,
                     config.size,
                 )
 
-                moves.append({"ptn": move, "white": wwins, "black": bwins, "draw": draws})
+                moves.append({"ptn": display_move, "white": orbit_wwins, "black": orbit_bwins, "draw": orbit_draws})
 
             moves.sort(key=lambda x: x['white']+x['black']+x['draw'], reverse=True)
 

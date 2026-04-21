@@ -82,6 +82,43 @@ def get_tps_orientation(tps: TpsString) -> Tuple[NormalizedTpsString, TpsSymmetr
     return NormalizedTpsString(best_tps), TpsSymmetry(o)
 
 
+def get_self_symmetries(tps: TpsString) -> list[TpsSymmetry]:
+    """
+    Return the list of D4 orientations (0..7) that leave `tps` unchanged.
+
+    `tps` may include trailing side-to-move and move-counter; only the board
+    portion is inspected. The orientation encoding matches `transform_tps` /
+    `transform_move`: 0..3 are rotations by 0/90/180/270 degrees and 4..7 are
+    the same rotations applied after a horizontal flip. The identity (0) is
+    always included.
+
+    This identifies the symmetries that a *canonical* board still admits after
+    normalization, so callers can group symmetrically-equivalent moves into a
+    single orbit.
+    """
+    bare = TpsString(tps.split(' ')[0])
+    expanded = expand_tps_xn(bare)
+
+    result: list[TpsSymmetry] = [TpsSymmetry(0)]
+
+    rot_tps = expanded
+    for i in range(1, 4):
+        rot_tps = rotate_tps(rot_tps)
+        if rot_tps == expanded:
+            result.append(TpsSymmetry(i))
+
+    flipped = flip_tps(expanded)
+    if flipped == expanded:
+        result.append(TpsSymmetry(4))
+    rot_tps = flipped
+    for i in range(5, 8):
+        rot_tps = rotate_tps(rot_tps)
+        if rot_tps == expanded:
+            result.append(TpsSymmetry(i))
+
+    return result
+
+
 def transform_tps(tps: TpsString, orientation: int) -> TpsString:
     # remove current player and current move
     parts = tps.split(' ')
